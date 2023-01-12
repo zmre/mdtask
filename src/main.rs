@@ -1,20 +1,32 @@
-extern crate confy;
+/* extern crate confy;
 extern crate serde;
 #[macro_use]
-extern crate serde_derive;
+extern crate serde_derive; */
 
 use clap::Parser;
 use log::{info, warn};
 use serde_derive::{Deserialize, Serialize};
-use std::io::{self, Write};
+use std::error;
+use std::io::{self, BufWriter, Read, StdoutLock, Write};
+use std::path::{Path, PathBuf};
+
+use grep::matcher::Matcher;
+use grep::regex::RegexMatcher;
+use grep::searcher::sinks::UTF8;
+use grep::searcher::{
+    Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkError, SinkMatch,
+};
 
 /// Search for a pattern in a file and display the lines that contain it.
-#[derive(Parser)]
+#[derive(Debug, Parser)]
+#[command(author, version, about = "Mine markdown for tasks", long_about = None)]
 struct Cli {
     /// The pattern to look for
-    pattern: String,
+    #[arg(short, long)]
+    pattern: Option<String>,
     /// The path to the file to read
-    path: std::path::PathBuf,
+    #[arg(default_values_os_t=vec![PathBuf::from(".")])]
+    path_or_file: Vec<std::path::PathBuf>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -37,14 +49,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
     let cfg: MyConfig = confy::load("mdtask", None)?;
 
-    // info!("args: {:#?}", args);
+    info!("args: {:?}", args);
+    info!("cfg: {:?}", cfg);
 
-    let stdout = io::stdout(); // get the global stdout entity
-    let mut handle = io::BufWriter::new(stdout.lock()); // optional: wrap that handle in a buffer
-    writeln!(handle, "Hello, world!: {}", 42)?;
+    let matcher = RegexMatcher::new(r"^\s*[*-] \[ \]")?;
+    // let mut matches: Vec<(u64, String)> = vec![];
+    let mut file_searcher = SearcherBuilder::new()
+        .before_context(50)
+        .after_context(20)
+        .build();
+    let mut heading_searcher = SearcherBuilder::new().build();
+    for file_or_path in args.path_or_file.iter() {
+        file_searcher.search_path(&matcher, &file_or_path, TaskOutput::new(&file_or_path))?;
+    }
+    /* searcher.search_path()
+    Searcher::new().search_slice(&matcher, SHERLOCK, UTF8(|lnum, line| {
+        // We are guaranteed to find a match, so the unwrap is OK.
+        let mymatch = matcher.find(line.as_bytes())?.unwrap();
+        matches.push((lnum, line[mymatch].to_string()));
+        Ok(true)
+    }))?; */
 
-    println!("Hello, world!");
     Ok(())
+}
+
+pub struct TaskOutput<'a> {
+    pub file: &'a PathBuf,
+    handle: BufWriter<StdoutLock<'a>>,
+}
+
+impl<'a> TaskOutput<'a> {
+    fn new(file: &'a PathBuf) -> TaskOutput<'a> {
+        let stdout = io::stdout(); // get the global stdout entity
+        let handle = io::BufWriter::new(stdout.lock());
+        TaskOutput { file, handle }
+    }
+}
+
+impl<'a> Sink for TaskOutput<'a> {
+    type Error = io::Error;
+
+    fn matched(&mut self, _searcher: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, io::Error> {
+        let matched = match std::str::from_utf8(mat.bytes()) {
+            Ok(matched) => matched,
+            Err(err) => return Err(io::Error::error_message(err)),
+        };
+        let line_number = match mat.line_number() {
+            Some(line_number) => line_number,
+            None => {
+                let msg = "line numbers not enabled";
+                return Err(io::Error::error_message(msg));
+            }
+        };
+        write!(self.handle, "{:?}:{}: {}", self.file, line_number, &matched)?;
+        Ok(true)
+    }
+    fn context(
+        &mut self,
+        _searcher: &Searcher,
+        _context: &SinkContext<'_>,
+    ) -> Result<bool, Self::Error> {
+        let context = std::str::from_utf8(_context.bytes())
+            .map_err(|e| io::Error::error_message("context isn't utf-8"))?;
+        match _context.kind() {
+            SinkContextKind::Before => {
+                // Display only headers
+                write!(self.handle, "{}", context);
+                Ok(true)
+            }
+            SinkContextKind::After => {
+                write!(self.handle, "{}", context);
+                Ok(true)
+            }
+            SinkContextKind::Other => Ok(true),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -60,14 +139,14 @@ mod tests_submodules {
     }
     /* #[test]
     fn file_doesnt_exist() -> Result<(), Box<dyn std::error::Error>> {
-        let mut cmd = Command::cargo_bin("mdtask")?;
+    let mut cmd = Command::cargo_bin("mdtask")?;
 
-        cmd.arg("foobar").arg("test/file/doesnt/exist");
-        cmd.assert()
-            .failure()
-            .stderr(predicate::str::contains("could not read file"));
+    cmd.arg("foobar").arg("test/file/doesnt/exist");
+    cmd.assert()
+    .failure()
+    .stderr(predicate::str::contains("could not read file"));
 
-        Ok(())
+    Ok(())
     } */
 
     #[test]
