@@ -16,6 +16,8 @@ use grep::searcher::sinks::UTF8;
 use grep::searcher::{
     Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkError, SinkMatch,
 };
+use ignore::types::TypesBuilder;
+use ignore::WalkBuilder;
 
 /// Search for a pattern in a file and display the lines that contain it.
 #[derive(Debug, Parser)]
@@ -59,9 +61,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .after_context(20)
         .build();
     let mut heading_searcher = SearcherBuilder::new().build();
-    for file_or_path in args.path_or_file.iter() {
-        file_searcher.search_path(&matcher, &file_or_path, TaskOutput::new(&file_or_path))?;
+    let mut tbuilder = TypesBuilder::new();
+    //tbuilder.add_defaults();
+    tbuilder.add("markdown", "*.md");
+    tbuilder.select("markdown");
+    let tmatcher = tbuilder.build().unwrap();
+    let default_path = std::env::current_dir()?;
+    println!("curdir: {:?}", &default_path);
+    // let mut walker_builder = WalkBuilder::new(args.path_or_file.first().unwrap_or(&default_path));
+    // walker_builder
+    //     .follow_links(true)
+    //     .types(tmatcher)
+    //     .standard_filters(true);
+    // println!("walker: {:?}", &walker_builder);
+    // for file_or_path in args.path_or_file.iter().skip(1) {
+    //     walker_builder.add(file_or_path);
+    // }
+    // let walker = walker_builder.build();
+    let walker2 = WalkBuilder::new(default_path)
+        .follow_links(true)
+        .types(tmatcher)
+        .standard_filters(true)
+        .build();
+
+    for file_or_path in walker2 {
+        let fp = file_or_path?;
+        let path = fp.path();
+        println!("{:?}, {:?}", &fp, fp.path());
+        if path.is_dir() {
+            continue;
+        }
+
+        file_searcher.search_path(&matcher, fp.path(), TaskOutput::new(fp.path()))?;
+        //println!("{:?}", result);
     }
+
     /* searcher.search_path()
     Searcher::new().search_slice(&matcher, SHERLOCK, UTF8(|lnum, line| {
         // We are guaranteed to find a match, so the unwrap is OK.
@@ -74,12 +108,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub struct TaskOutput<'a> {
-    pub file: &'a PathBuf,
+    pub file: &'a Path,
     handle: BufWriter<StdoutLock<'a>>,
 }
 
 impl<'a> TaskOutput<'a> {
-    fn new(file: &'a PathBuf) -> TaskOutput<'a> {
+    fn new(file: &'a Path) -> TaskOutput<'a> {
         let stdout = io::stdout(); // get the global stdout entity
         let handle = io::BufWriter::new(stdout.lock());
         TaskOutput { file, handle }

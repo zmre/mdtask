@@ -510,6 +510,7 @@ dependencies = [
  "confy",
  "env_logger",
  "grep",
+ "ignore",
  "log",
  "predicates",
  "serde",
