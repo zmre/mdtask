@@ -14,7 +14,7 @@ use grep::matcher::Matcher;
 use grep::regex::RegexMatcher;
 use grep::searcher::sinks::UTF8;
 use grep::searcher::{
-    Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkError, SinkMatch,
+    Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkError, SinkFinish, SinkMatch,
 };
 use ignore::types::TypesBuilder;
 use ignore::WalkBuilder;
@@ -27,7 +27,7 @@ struct Cli {
     #[arg(short, long)]
     pattern: Option<String>,
     /// The path to the file to read
-    #[arg(default_values_os_t=vec![PathBuf::from(".")])]
+    #[arg(default_values_os_t=vec![std::env::current_dir().unwrap_or(PathBuf::from("."))])]
     path_or_file: Vec<std::path::PathBuf>,
 }
 
@@ -55,39 +55,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("cfg: {:?}", cfg);
 
     let matcher = RegexMatcher::new(r"^\s*[*-] \[ \]")?;
-    // let mut matches: Vec<(u64, String)> = vec![];
     let mut file_searcher = SearcherBuilder::new()
         .before_context(50)
         .after_context(20)
         .build();
     let mut heading_searcher = SearcherBuilder::new().build();
     let mut tbuilder = TypesBuilder::new();
-    //tbuilder.add_defaults();
     tbuilder.add("markdown", "*.md");
     tbuilder.select("markdown");
     let tmatcher = tbuilder.build().unwrap();
-    let default_path = std::env::current_dir()?;
-    println!("curdir: {:?}", &default_path);
-    // let mut walker_builder = WalkBuilder::new(args.path_or_file.first().unwrap_or(&default_path));
-    // walker_builder
-    //     .follow_links(true)
-    //     .types(tmatcher)
-    //     .standard_filters(true);
-    // println!("walker: {:?}", &walker_builder);
-    // for file_or_path in args.path_or_file.iter().skip(1) {
-    //     walker_builder.add(file_or_path);
-    // }
-    // let walker = walker_builder.build();
-    let walker2 = WalkBuilder::new(default_path)
+    let mut walker_builder = WalkBuilder::new(args.path_or_file.first().unwrap());
+    walker_builder
         .follow_links(true)
         .types(tmatcher)
-        .standard_filters(true)
-        .build();
+        .standard_filters(true);
+    for file_or_path in args.path_or_file.iter().skip(1) {
+        walker_builder.add(file_or_path);
+    }
+    let walker = walker_builder.build();
 
-    for file_or_path in walker2 {
+    for file_or_path in walker {
         let fp = file_or_path?;
         let path = fp.path();
-        println!("{:?}, {:?}", &fp, fp.path());
+        // println!("{:?}, {:?}", &fp, fp.path());
         if path.is_dir() {
             continue;
         }
@@ -110,13 +100,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 pub struct TaskOutput<'a> {
     pub file: &'a Path,
     handle: BufWriter<StdoutLock<'a>>,
+    matches: Vec<String>,
+    before: Vec<String>,
+    after: Vec<String>,
 }
 
 impl<'a> TaskOutput<'a> {
     fn new(file: &'a Path) -> TaskOutput<'a> {
         let stdout = io::stdout(); // get the global stdout entity
         let handle = io::BufWriter::new(stdout.lock());
-        TaskOutput { file, handle }
+        TaskOutput {
+            file,
+            handle,
+            matches: Vec::new(),
+            before: Vec::new(),
+            after: Vec::new(),
+        }
     }
 }
 
@@ -135,6 +134,7 @@ impl<'a> Sink for TaskOutput<'a> {
                 return Err(io::Error::error_message(msg));
             }
         };
+        self.matches.push(format!("{} #L{}", matched, line_number));
         write!(self.handle, "{:?}:{}: {}", self.file, line_number, &matched)?;
         Ok(true)
     }
@@ -148,15 +148,18 @@ impl<'a> Sink for TaskOutput<'a> {
         match _context.kind() {
             SinkContextKind::Before => {
                 // Display only headers
-                write!(self.handle, "{}", context);
+                // write!(self.handle, "{}", context)?;
                 Ok(true)
             }
             SinkContextKind::After => {
-                write!(self.handle, "{}", context);
+                // write!(self.handle, "{}", context)?;
                 Ok(true)
             }
             SinkContextKind::Other => Ok(true),
         }
+    }
+    fn finish(&mut self, searcher: &Searcher, finish: &SinkFinish) -> Result<(), io::Error> {
+        Ok(())
     }
 }
 
