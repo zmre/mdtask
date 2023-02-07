@@ -4,15 +4,14 @@ extern crate serde;
 extern crate serde_derive; */
 
 use clap::Parser;
-use log::{info, warn};
+use log::info;
 use serde_derive::{Deserialize, Serialize};
-use std::error;
-use std::io::{self, BufWriter, Read, StdoutLock, Write};
+use std::io::{self, BufWriter, StdoutLock, Write};
 use std::path::{Path, PathBuf};
 
-use grep::matcher::Matcher;
+// use grep::matcher::Matcher;
 use grep::regex::RegexMatcher;
-use grep::searcher::sinks::UTF8;
+// use grep::searcher::sinks::UTF8;
 use grep::searcher::{
     Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkError, SinkFinish, SinkMatch,
 };
@@ -54,14 +53,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("args: {:?}", args);
     info!("cfg: {:?}", cfg);
 
-    let matcher = RegexMatcher::new(r"^\s*[*-] \[ \]")?;
+    // We need the matcher to get headings as well as tasks
+    let matcher = RegexMatcher::new(r"^(#+\s|\s*[*-] \[ \] )")?;
     let mut file_searcher = SearcherBuilder::new()
-        .before_context(50)
+        .before_context(0)
         .after_context(20)
         .build();
-    let mut heading_searcher = SearcherBuilder::new().build();
     let mut tbuilder = TypesBuilder::new();
-    tbuilder.add("markdown", "*.md");
+    tbuilder.add("markdown", "*.md")?;
     tbuilder.select("markdown");
     let tmatcher = tbuilder.build().unwrap();
     let mut walker_builder = WalkBuilder::new(args.path_or_file.first().unwrap());
@@ -86,23 +85,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         //println!("{:?}", result);
     }
 
-    /* searcher.search_path()
-    Searcher::new().search_slice(&matcher, SHERLOCK, UTF8(|lnum, line| {
-        // We are guaranteed to find a match, so the unwrap is OK.
-        let mymatch = matcher.find(line.as_bytes())?.unwrap();
-        matches.push((lnum, line[mymatch].to_string()));
-        Ok(true)
-    }))?; */
-
     Ok(())
+}
+
+fn count_leading_whitespace(s: &str) -> u8 {
+    s.chars()
+        .take_while(|ch| ch.is_whitespace())
+        .map(|ch| match ch {
+            ' ' => 1,
+            '\t' => 4,
+            _ => 0,
+        })
+        .sum()
+}
+fn count_leading_hashes(s: &str) -> u8 {
+    s.chars().take_while(|ch| ch == &'#').map(|_| 1).sum()
+}
+
+fn filter_headers_to_parents_old(s: &str) -> String {
+    let mut lastlevel = 0u8;
+    s.lines()
+        .rev()
+        .filter(|line| {
+            // Guard against garbage lines mixed in
+            if !line.starts_with("#") {
+                return false;
+            }
+
+            let thislevel = count_leading_hashes(&line);
+
+            if lastlevel == 0 || thislevel < lastlevel {
+                lastlevel = thislevel;
+                println!("...keeping");
+                true
+            } else {
+                println!("...discard");
+                false
+            }
+        })
+        .rev()
+        .collect::<Vec<&str>>()
+        .join("\n")
+}
+
+fn filter_headers_to_parents(s: &str) -> String {
+    let mut lastlevel = 0u8;
+    let (result, _) = s
+        .lines()
+        .rev()
+        .fold((String::new(), 0), |(s, lastlevel), line| {
+            // Guard against garbage lines mixed in
+            if !line.starts_with("#") {
+                return (s, lastlevel);
+            }
+            let thislevel = count_leading_hashes(&line);
+
+            if lastlevel == 0 || thislevel < lastlevel {
+                // keeping the line
+                // put line on front since we reveresed order above
+                let new_s = format!("{}\n{}", line, s);
+                (new_s, thislevel)
+            } else {
+                // discarding the line
+                (s, lastlevel)
+            }
+        });
+    result
 }
 
 pub struct TaskOutput<'a> {
     pub file: &'a Path,
     handle: BufWriter<StdoutLock<'a>>,
-    matches: Vec<String>,
-    before: Vec<String>,
-    after: Vec<String>,
+    last_match_indent: u8,
+    process_after: bool,
+    unprinted_headers: String,
+    first_print: bool,
 }
 
 impl<'a> TaskOutput<'a> {
@@ -112,9 +169,10 @@ impl<'a> TaskOutput<'a> {
         TaskOutput {
             file,
             handle,
-            matches: Vec::new(),
-            before: Vec::new(),
-            after: Vec::new(),
+            last_match_indent: 0,
+            process_after: false,
+            unprinted_headers: String::new(),
+            first_print: true,
         }
     }
 }
@@ -122,43 +180,70 @@ impl<'a> TaskOutput<'a> {
 impl<'a> Sink for TaskOutput<'a> {
     type Error = io::Error;
 
+    fn begin(&mut self, _searcher: &Searcher) -> Result<bool, Self::Error> {
+        if let Some(filename) = self.file.file_name().and_then(|s| s.to_str()) {
+            write!(self.handle, "\n\n--{}--\n", filename)?;
+        }
+        Ok(true)
+    }
+
     fn matched(&mut self, _searcher: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, io::Error> {
         let matched = match std::str::from_utf8(mat.bytes()) {
             Ok(matched) => matched,
             Err(err) => return Err(io::Error::error_message(err)),
         };
-        let line_number = match mat.line_number() {
-            Some(line_number) => line_number,
-            None => {
-                let msg = "line numbers not enabled";
-                return Err(io::Error::error_message(msg));
-            }
-        };
-        self.matches.push(format!("{} #L{}", matched, line_number));
-        write!(self.handle, "{:?}:{}: {}", self.file, line_number, &matched)?;
+        if matched.starts_with("#") {
+            self.unprinted_headers.push_str(&matched);
+        } else {
+            self.last_match_indent = count_leading_whitespace(&matched);
+            self.process_after = true;
+
+            // only show relevant parent headers
+            let unprinted = filter_headers_to_parents(&self.unprinted_headers);
+
+            write!(
+                self.handle,
+                "{}{}{}\n",
+                if self.first_print || unprinted.len() == 0 {
+                    ""
+                } else {
+                    "\n" // leading extra space before header sections after first
+                },
+                unprinted,
+                &matched.trim_end()
+            )?;
+            self.first_print = false;
+            self.unprinted_headers = String::new();
+        }
         Ok(true)
     }
+
     fn context(
         &mut self,
         _searcher: &Searcher,
         _context: &SinkContext<'_>,
     ) -> Result<bool, Self::Error> {
         let context = std::str::from_utf8(_context.bytes())
-            .map_err(|e| io::Error::error_message("context isn't utf-8"))?;
+            .map_err(|e| io::Error::error_message(format!("context isn't utf-8 {}", e)))?;
+
         match _context.kind() {
-            SinkContextKind::Before => {
-                // Display only headers
-                // write!(self.handle, "{}", context)?;
-                Ok(true)
-            }
+            SinkContextKind::Before => {}
             SinkContextKind::After => {
-                // write!(self.handle, "{}", context)?;
-                Ok(true)
+                if self.process_after && count_leading_whitespace(&context) > self.last_match_indent
+                {
+                    // print as long as indent is greater
+                    write!(self.handle, "{}", context)?;
+                } else {
+                    // stop printing if anything is equal or less on indent
+                    self.process_after = false;
+                }
             }
-            SinkContextKind::Other => Ok(true),
+            SinkContextKind::Other => {} // no-op,
         }
+        Ok(true)
     }
-    fn finish(&mut self, searcher: &Searcher, finish: &SinkFinish) -> Result<(), io::Error> {
+
+    fn finish(&mut self, _searcher: &Searcher, _finish: &SinkFinish) -> Result<(), io::Error> {
         Ok(())
     }
 }
@@ -170,33 +255,75 @@ mod tests_submodules {
     use predicates::prelude::*; // Used for writing assertions
     use std::process::Command; // Run programs
 
-    #[test]
+    /* #[test]
     fn check_answer_validity() {
         assert_eq!(32 + 10, 42);
-    }
-    /* #[test]
-    fn file_doesnt_exist() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = Command::cargo_bin("mdtask")?;
-
-    cmd.arg("foobar").arg("test/file/doesnt/exist");
-    cmd.assert()
-    .failure()
-    .stderr(predicate::str::contains("could not read file"));
-
-    Ok(())
     } */
+    #[test]
+    fn file_doesnt_exist() -> Result<(), Box<dyn std::error::Error>> {
+        let mut cmd = Command::cargo_bin("mdtask")?;
+
+        cmd.arg("foobar").arg("test/file/doesnt/exist");
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains("No such file or directory"));
+        Ok(())
+    }
 
     #[test]
     fn find_content_in_file() -> Result<(), Box<dyn std::error::Error>> {
         let file = assert_fs::NamedTempFile::new("sample.txt")?;
-        file.write_str("A test\nActual content\nMore content\nAnother test")?;
+        file.write_str("A test\n\n* [ ] my task\n\t* additional info\nAnother test")?;
 
         let mut cmd = Command::cargo_bin("mdtask")?;
-        cmd.arg("test").arg(file.path());
+        cmd.arg(file.path());
         cmd.assert()
             .success()
-            .stdout(predicate::str::contains("test\nAnother test"));
+            .stdout(predicate::str::contains("my task\n\t* additional"));
 
         Ok(())
+    }
+
+    #[test]
+    fn check_count_leading_whitespace() {
+        assert_eq!(super::count_leading_whitespace("no leading space"), 0);
+        assert_eq!(super::count_leading_whitespace(" one leading space"), 1);
+        assert_eq!(super::count_leading_whitespace("\ttab leading space"), 4);
+        assert_eq!(
+            super::count_leading_whitespace("    \ttab and four leading spaces"),
+            8
+        );
+    }
+
+    #[test]
+    fn check_count_leading_hashes() {
+        assert_eq!(super::count_leading_hashes("nothing here"), 0);
+        assert_eq!(super::count_leading_hashes("# Heading 1"), 1);
+        assert_eq!(super::count_leading_hashes("### Heading 3"), 3);
+        assert_eq!(
+            super::count_leading_hashes("#-# Not a heading but count should be one"),
+            1
+        );
+        assert_eq!(super::count_leading_hashes("##### Heading 5"), 5);
+    }
+
+    #[test]
+    fn check_filter_headers_to_parents() {
+        assert_eq!(
+            super::filter_headers_to_parents(
+                r#"# Top Level
+## Ignore me
+### Ignore me
+## Sub heading two
+### Ignore me
+### Sub two two
+#### Sub sub two three"#
+            ),
+            r#"# Top Level
+## Sub heading two
+### Sub two two
+#### Sub sub two three
+"#
+        );
     }
 }
