@@ -102,34 +102,7 @@ fn count_leading_hashes(s: &str) -> u8 {
     s.chars().take_while(|ch| ch == &'#').map(|_| 1).sum()
 }
 
-fn filter_headers_to_parents_old(s: &str) -> String {
-    let mut lastlevel = 0u8;
-    s.lines()
-        .rev()
-        .filter(|line| {
-            // Guard against garbage lines mixed in
-            if !line.starts_with("#") {
-                return false;
-            }
-
-            let thislevel = count_leading_hashes(&line);
-
-            if lastlevel == 0 || thislevel < lastlevel {
-                lastlevel = thislevel;
-                println!("...keeping");
-                true
-            } else {
-                println!("...discard");
-                false
-            }
-        })
-        .rev()
-        .collect::<Vec<&str>>()
-        .join("\n")
-}
-
 fn filter_headers_to_parents(s: &str) -> String {
-    let mut lastlevel = 0u8;
     let (result, _) = s
         .lines()
         .rev()
