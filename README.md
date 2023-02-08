@@ -1,3 +1,7 @@
+---
+Tags: #readme #directions
+---
+
 # README
 
 ## test

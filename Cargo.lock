@@ -511,8 +511,10 @@ dependencies = [
  "env_logger",
  "grep",
  "ignore",
+ "lazy_static",
  "log",
  "predicates",
+ "regex",
  "serde",
  "serde_derive",
 ]

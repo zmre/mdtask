@@ -1,11 +1,16 @@
 /* extern crate confy;
 extern crate serde;
 #[macro_use]
-extern crate serde_derive; */
+extern crate serde_derive;
+#[macro_use]
+extern crate lazy_static; */
 
 use clap::Parser;
+use lazy_static::lazy_static;
 use log::info;
+use regex::Regex;
 use serde_derive::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::io::{self, BufWriter, StdoutLock, Write};
 use std::path::{Path, PathBuf};
 
@@ -53,8 +58,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("args: {:?}", args);
     info!("cfg: {:?}", cfg);
 
-    // We need the matcher to get headings as well as tasks
-    let matcher = RegexMatcher::new(r"^(#+\s|\s*[*-] \[ \] )")?;
+    // We need the matcher to get headings and tags as well as tasks
+    let matcher = RegexMatcher::new(r"^(#+\s|\s*[*-] \[ \] |[Tt]ags: #)")?;
     let mut file_searcher = SearcherBuilder::new()
         .before_context(0)
         .after_context(20)
@@ -126,13 +131,24 @@ fn filter_headers_to_parents(s: &str) -> String {
     result
 }
 
+fn extract_tags_from_line(s: &str) -> HashSet<String> {
+    lazy_static! {
+        static ref HASHTAG_REGEX: Regex = Regex::new(r"\#[a-zA-Z][0-9a-zA-Z_-]*").unwrap();
+    }
+    HASHTAG_REGEX
+        .find_iter(s)
+        .map(|mat| String::from(mat.as_str().trim_start_matches("#")))
+        .collect()
+}
+
 pub struct TaskOutput<'a> {
     pub file: &'a Path,
+    file_tags: HashSet<String>,
     handle: BufWriter<StdoutLock<'a>>,
     last_match_indent: u8,
     process_after: bool,
     unprinted_headers: String,
-    first_print: bool,
+    first_match: bool,
 }
 
 impl<'a> TaskOutput<'a> {
@@ -145,7 +161,8 @@ impl<'a> TaskOutput<'a> {
             last_match_indent: 0,
             process_after: false,
             unprinted_headers: String::new(),
-            first_print: true,
+            first_match: true,
+            file_tags: HashSet::new(),
         }
     }
 }
@@ -154,9 +171,6 @@ impl<'a> Sink for TaskOutput<'a> {
     type Error = io::Error;
 
     fn begin(&mut self, _searcher: &Searcher) -> Result<bool, Self::Error> {
-        if let Some(filename) = self.file.file_name().and_then(|s| s.to_str()) {
-            write!(self.handle, "\n\n--{}--\n", filename)?;
-        }
         Ok(true)
     }
 
@@ -167,7 +181,25 @@ impl<'a> Sink for TaskOutput<'a> {
         };
         if matched.starts_with("#") {
             self.unprinted_headers.push_str(&matched);
+        } else if matched.to_lowercase().starts_with("tags: #") {
+            self.file_tags = extract_tags_from_line(&matched);
         } else {
+            if self.first_match {
+                if let Some(filename) = self.file.file_name().and_then(|s| s.to_str()) {
+                    // why double nest ifs? b/c rust doesn't allow logic with if let
+                    let tags = self
+                        .file_tags
+                        .iter()
+                        .map(|t| format!("#{}", t))
+                        .collect::<Vec<String>>();
+                    let tags_string = if tags.is_empty() {
+                        "".to_string()
+                    } else {
+                        format!(" ({})", tags.join(", "))
+                    };
+                    write!(self.handle, "\n\n--{}{}--\n", filename, tags_string)?;
+                }
+            }
             self.last_match_indent = count_leading_whitespace(&matched);
             self.process_after = true;
 
@@ -177,7 +209,7 @@ impl<'a> Sink for TaskOutput<'a> {
             write!(
                 self.handle,
                 "{}{}{}\n",
-                if self.first_print || unprinted.len() == 0 {
+                if self.first_match || unprinted.len() == 0 {
                     ""
                 } else {
                     "\n" // leading extra space before header sections after first
@@ -185,7 +217,7 @@ impl<'a> Sink for TaskOutput<'a> {
                 unprinted,
                 &matched.trim_end()
             )?;
-            self.first_print = false;
+            self.first_match = false;
             self.unprinted_headers = String::new();
         }
         Ok(true)
@@ -226,6 +258,7 @@ mod tests_submodules {
     use assert_cmd::prelude::*; // Add methods on commands
     use assert_fs::prelude::*;
     use predicates::prelude::*; // Used for writing assertions
+    use std::collections::HashSet;
     use std::process::Command; // Run programs
 
     /* #[test]
@@ -265,6 +298,14 @@ mod tests_submodules {
         assert_eq!(
             super::count_leading_whitespace("    \ttab and four leading spaces"),
             8
+        );
+    }
+
+    #[test]
+    fn check_extract_tags_from_line() {
+        assert_eq!(
+            super::extract_tags_from_line("one #two three #four five #six-six"),
+            HashSet::from(["two".to_string(), "four".to_string(), "six-six".to_string()])
         );
     }
 
