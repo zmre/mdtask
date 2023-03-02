@@ -206,16 +206,22 @@ impl<'a> Sink for TaskOutput<'a> {
             // only show relevant parent headers
             let unprinted = filter_headers_to_parents(&self.unprinted_headers);
 
+            let line_number = match mat.line_number() {
+                Some(line_number) => line_number,
+                None => 0,
+            };
+
             write!(
                 self.handle,
-                "{}{}{}\n",
+                "{}{}{} {{L:{}}}\n",
                 if self.first_match || unprinted.len() == 0 {
                     ""
                 } else {
                     "\n" // leading extra space before header sections after first
                 },
                 unprinted,
-                &matched.trim_end()
+                &matched.trim_end(),
+                line_number
             )?;
             self.first_match = false;
             self.unprinted_headers = String::new();
